@@ -1,11 +1,22 @@
 import streamlit as st
 import time  # Import the time module to use sleep
+
+# This must be the first Streamlit command
+st.set_page_config(page_title="SmartExam Creator", page_icon="📝")
+
+from st_supabase_connection import SupabaseConnection
+from stqdm import stqdm
+from supabase import Client
+from openai import OpenAI
+import dotenv
 import os
 import json
 from PyPDF2 import PdfReader
+from PIL import Image
+from io import BytesIO
+import pandas as pd
 from fpdf import FPDF
-import dotenv
-from openai import OpenAI
+import base64
 
 __version__ = "1.1.0"
 
@@ -13,9 +24,9 @@ __version__ = "1.1.0"
 def stream_llm_response(messages, model_params, api_key):
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
-        model=model_params.get("model", "gpt-4o"),
+        model=model_params["model"] if "model" in model_params else "gpt-4o",
         messages=messages,
-        temperature=model_params.get("temperature", 0.3),
+        temperature=model_params["temperature"] if "temperature" in model_params else 0.3,
         max_tokens=4096,
     )
     return response.choices[0].message.content
@@ -27,9 +38,13 @@ def extract_text_from_pdf(pdf_file):
         text += page.extract_text() + "\n"
     return text
 
-def summarize_text(text, api_key):
-    prompt = "Please summarize the following text to be concise and to the point:\n\n" + text
-    messages = [{"role": "user", "content": prompt}]
+def summarize_text(text, api_key=st.secrets["OPENAI_API_KEY"]):
+    prompt = (
+        "Please summarize the following text to be concise and to the point:\n\n" + text
+    )
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
     summary = stream_llm_response(messages, model_params={"model": "gpt-4o-mini", "temperature": 0.3}, api_key=api_key)
     return summary
 
@@ -47,121 +62,27 @@ def chunk_text(text, max_tokens=3000):
         chunks.append(chunk)
     return chunks
 
-def generate_mc_questions(content_text, api_key):
+def generate_mc_questions(content_text, api_key=st.secrets["OPENAI_API_KEY"]):
     prompt = (
-        """// Objective:
-- You convert part of the content to JSON. Your output is always in German.
-- Generate 15 multiple choice questions based on the key concepts and information from the provided JSON file. 
-- Each question should have one correct answer and two plausible incorrect answers.
-
-// Steps:
-1. Extract Key Concepts and Information:
-- Identify and extract key sections from the JSON that contain important concepts, definitions, and explanations.
-- Focus on sections: "overview", "headings", "terminology", "faqs", and "key_points".
-
-2. Formulate Questions:
-- ALWAYS Create 15 questions that test the understanding of the extracted key sections.
-- Ensure each question is clear and directly related to the key concepts.
-
-3. Generate Answer Choices:
-- For each question, generate one correct answer and two very plausible incorrect answers.
-- Ensure that each answer is equally long. Add superficial information to wrong answers to ensure equal length.
-
-4. Provide Feedback:
-For the correct answer, provide "feedback" that includes further information in one sentence.
-For each incorrect answer, provide "feedback" that includes the correct answer in one sentence.
-For each question, provide "real_life_examples".
-
-5. Format:
-The output is STRICTLY formatted according to //Output. Including "additional_info" and "real_life_examples".
-
-// JSON Logic
-Questions Array: Contains multiple question objects.
-Question Object: Each object represents a single question and contains:
-title: The title of the question.
-type: The type of the question (e.g., MC).
-question_text: The actual question text.
-answers: An array of answer objects.
-text: The text of the answer.
-is_correct: A boolean indicating if the answer is correct.
-feedback: Feedback for the answer, providing additional context and explanation.
-points: Points awarded for a correct answer, e.g. '1'.
-penalty: Penalty points for an incorrect answer, e.g. '-0.5'.
-additional_info: Any extra information that might be useful, such as "real-life examples".
-
-//Output
-{
-  "questions": [
-    {
-      "title": "Economy",
-      "type": "MC",
-      "question_text": "What drives the entire economy by motivating people to demand goods and services?",
-      "answers": [
-        {
-          "text": "Needs",
-          "is_correct": true,
-          "feedback": "Correct! Needs are the primary motivation for economic activity. For example, the need for food drives agricultural production and grocery sales."
-        },
-        {
-          "text": "Wants",
-          "is_correct": false,
-          "feedback": "Wrong! While wants also influence economic activity, needs are more fundamental. The correct answer is needs. Needs are the primary motivation for economic activity. For example, the need for food drives agricultural production and grocery sales."
-        },
-        {
-          "text": "Desires",
-          "is_correct": false,
-          "feedback": "Wrong! Desires are similar to wants and do influence economic activity, but needs are the fundamental drivers. The correct answer is needs. Needs are the primary motivation for economic activity. For example, the need for food drives agricultural production and grocery sales."
-        }
-      ],
-      "points": 1,
-      "penalty": -0.5,
-      "additional_info": {
-        "real_life_example": "For example, the need for food drives agricultural production and grocery sales."
-      }
-    },
-    {
-      "title": "Supply and Demand",
-      "type": "MC",
-      "question_text": "What is the outcome when supply and demand in a market balance each other?",
-      "answers": [
-        {
-          "text": "Market equilibrium",
-          "is_correct": true,
-          "feedback": "Correct! Market equilibrium occurs when the quantity supplied equals the quantity demanded. For example, when the supply of smartphones matches consumer demand, prices remain stable."
-        },
-        {
-          "text": "Price increase",
-          "is_correct": false,
-          "feedback": "Wrong! A price increase happens when demand exceeds supply, not when they are balanced. The correct answer is market equilibrium. Market equilibrium occurs when the quantity supplied equals the quantity demanded. For example, when the supply of smartphones matches consumer demand, prices remain stable."
-        },
-        {
-          "text": "Surplus",
-          "is_correct": false,
-          "feedback": "Wrong! A surplus occurs when supply exceeds demand, not when they are balanced. The correct answer is market equilibrium. Market equilibrium occurs when the quantity supplied equals the quantity demanded. For example, when the supply of smartphones matches consumer demand, prices remain stable."
-        }
-      ],
-      "points": 1,
-      "penalty": -0.5,
-      "additional_info": {
-        "real_life_example": "For example, when the supply of smartphones matches consumer demand, prices remain stable."
-      }
-    }
-  ]
-}
-"""
-    ).replace("{content}", content_text)
-    
-    messages = [{"role": "user", "content": prompt}]
+        "You are a professor in the field of Computational System Biology and should create an exam on the topic of the Input PDF. "
+        "Using the attached lecture slides (please analyze thoroughly), create a Master-level multiple-choice exam. The exam should contain multiple-choice and single-choice questions, "
+        "appropriately marked so that students know how many options to select. Create 30 realistic exam questions covering the entire content. Provide the output in JSON format. "
+        "The JSON should have the structure: [{'question': '...', 'choices': ['...'], 'correct_answer': '...', 'explanation': '...'}, ...]. Ensure the JSON is valid and properly formatted."
+    )
+    messages = [
+        {"role": "user", "content": content_text},
+        {"role": "user", "content": prompt},
+    ]
     response = stream_llm_response(messages, model_params={"model": "gpt-4o-mini", "temperature": 0.3}, api_key=api_key)
     return response
 
 def parse_generated_questions(response):
     try:
-        json_start = response.find('{')
-        json_end = response.rfind('}') + 1
+        json_start = response.find('[')
+        json_end = response.rfind(']') + 1
         json_str = response[json_start:json_end]
 
-        questions = json.loads(json_str)["questions"]
+        questions = json.loads(json_str)
         return questions
     except json.JSONDecodeError as e:
         st.error(f"JSON parsing error: {e}")
@@ -198,28 +119,38 @@ def generate_pdf(questions):
     pdf.add_page()
 
     for i, q in enumerate(questions):
-        question = f"Q{i+1}: {q['question_text']}"
+        question = f"Q{i+1}: {q['question']}"
         pdf.chapter_title(question)
 
-        choices = "\n".join([answer['text'] for answer in q['answers']])
+        choices = "\n".join(q['choices'])
         pdf.chapter_body(choices)
 
-        correct_answer = f"Correct answer: {next(answer['text'] for answer in q['answers'] if answer['is_correct'])}"
+        correct_answer = f"Correct answer: {q['correct_answer']}"
         pdf.chapter_body(correct_answer)
 
-        explanation = f"Explanation: {next(answer['feedback'] for answer in q['answers'] if answer['is_correct'])}"
+        explanation = f"Explanation: {q['explanation']}"
         pdf.chapter_body(explanation)
 
     return pdf.output(dest="S").encode("latin1")
 
 # Integration with the main app
 def main():
-    dotenv.load_dotenv()
-    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-
+    # Initialize app_mode if it doesn't exist
     if "app_mode" not in st.session_state:
         st.session_state.app_mode = "Upload PDF & Generate Questions"
     
+    # Main app content
+    dotenv.load_dotenv()
+
+    # Load your OpenAI API key from the environment variable
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]  # Use secrets, when using streamlit
+
+    openai_models = [
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo-16k",
+    ]
+
     st.sidebar.title("SmartExam Creator")
     
     app_mode_options = ["Upload PDF & Generate Questions", "Take the Quiz", "Download as PDF"]
@@ -227,10 +158,36 @@ def main():
     
     st.sidebar.markdown("## About")
     st.sidebar.video("https://youtu.be/zE3ToJLLSIY")
-    st.sidebar.info("placeholder")
+    st.sidebar.info(
+        """
+        **SmartExam Creator** is an innovative tool designed to help students and educators alike. 
+        Upload your lecture notes or handwritten notes to create personalized multiple-choice exams.
+        
+        **Story:**
+        This app was developed with the vision of making exam preparation easier and more interactive for students. 
+        Leveraging the power new AI models, it aims to transform traditional study methods into a more engaging and 
+        efficient process. Whether you're a student looking to test your knowledge or an educator seeking to create 
+        customized exams, SmartExam Creator is here to help.
+
+        **What makes SmartExam special ?**
+        Apart from other platforms that require costly subscriptions, this platform is designed from a STEM student
+        for all other students, but let us be honest, we do not have money for Subscriptions. That is why it is completely free for now.
+        I have designed the app as cost efficient as possible, so I can cover all business costs that are coming.  
+        
+        **Features:**
+        - Upload PDF documents
+        - Generate multiple-choice questions
+        - Take interactive quizzes
+        - Download generated exams as PDF
+
+        Built with ❤️ using OpenAI's GPT-4o-mini.
+
+        **Connect with me on [LinkedIn](https://www.linkedin.com/in/laurin-herbst/).**
+        """
+    )
     
     if st.session_state.app_mode == "Upload PDF & Generate Questions":
-        pdf_upload_app(OPENAI_API_KEY)
+        pdf_upload_app()
     elif st.session_state.app_mode == "Take the Quiz":
         if 'mc_test_generated' in st.session_state and st.session_state.mc_test_generated:
             if 'generated_questions' in st.session_state and st.session_state.generated_questions:
@@ -242,7 +199,7 @@ def main():
     elif st.session_state.app_mode == "Download as PDF":
         download_pdf_app()
 
-def pdf_upload_app(api_key):
+def pdf_upload_app():
     st.title("Upload Your Lecture - Create Your Test Exam")
     st.subheader("Show Us the Slides and We do the Rest")
 
@@ -258,14 +215,14 @@ def pdf_upload_app(api_key):
         st.success("PDF content added to the session.")
     
     if len(content_text) > 3000:
-        content_text = summarize_text(content_text, api_key)
+        content_text = summarize_text(content_text)
 
     if content_text:
         st.info("Generating the exam from the uploaded content. It will take just a minute...")
         chunks = chunk_text(content_text)
         questions = []
         for chunk in chunks:
-            response = generate_mc_questions(chunk, api_key)
+            response = generate_mc_questions(chunk)
             parsed_questions = parse_generated_questions(response)
             if parsed_questions:
                 questions.extend(parsed_questions)
@@ -275,6 +232,7 @@ def pdf_upload_app(api_key):
             st.session_state.mc_test_generated = True
             st.success("The game has been successfully created! Switch the Sidebar Panel to solve the exam.")
             
+            # Wait 2 seconds and switch to quiz mode
             time.sleep(2)
             st.session_state.app_mode = "Take the Quiz"
             st.rerun()
@@ -306,13 +264,13 @@ def mc_quiz_app():
             st.session_state.correct_answers = 0
 
         for i, quiz_data in enumerate(questions):
-            st.markdown(f"### Question {i+1}: {quiz_data['question_text']}")
+            st.markdown(f"### Question {i+1}: {quiz_data['question']}")
 
             if st.session_state.answers[i] is None:
-                user_choice = st.radio("Choose an answer:", [answer['text'] for answer in quiz_data['answers']], key=f"user_choice_{i}")
+                user_choice = st.radio("Choose an answer:", quiz_data['choices'], key=f"user_choice_{i}")
                 st.button(f"Submit your answer {i+1}", key=f"submit_{i}", on_click=submit_answer, args=(i, quiz_data))
             else:
-                st.radio("Choose an answer:", [answer['text'] for answer in quiz_data['answers']], key=f"user_choice_{i}", index=[answer['text'] for answer in quiz_data['answers']].index(st.session_state.answers[i]), disabled=True)
+                st.radio("Choose an answer:", quiz_data['choices'], key=f"user_choice_{i}", index=quiz_data['choices'].index(st.session_state.answers[i]), disabled=True)
                 if st.session_state.feedback[i][0] == "Correct":
                     st.success(st.session_state.feedback[i][0])
                 else:
@@ -336,11 +294,11 @@ def download_pdf_app():
 
     if questions:
         for i, q in enumerate(questions):
-            st.markdown(f"### Q{i+1}: {q['question_text']}")
-            for choice in q['answers']:
-                st.write(choice['text'])
-            st.write(f"**Correct answer:** {next(answer['text'] for answer in q['answers'] if answer['is_correct'])}")
-            st.write(f"**Explanation:** {next(answer['feedback'] for answer in q['answers'] if answer['is_correct'])}")
+            st.markdown(f"### Q{i+1}: {q['question']}")
+            for choice in q['choices']:
+                st.write(choice)
+            st.write(f"**Correct answer:** {q['correct_answer']}")
+            st.write(f"**Explanation:** {q['explanation']}")
             st.write("---")
 
         pdf_bytes = generate_pdf(questions)

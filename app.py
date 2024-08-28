@@ -1,9 +1,5 @@
 import streamlit as st
 import time  # Import the time module to use sleep
-
-# This must be the first Streamlit command
-st.set_page_config(page_title="SmartExam Creator", page_icon="📝")
-
 import os
 import json
 from PyPDF2 import PdfReader
@@ -31,13 +27,9 @@ def extract_text_from_pdf(pdf_file):
         text += page.extract_text() + "\n"
     return text
 
-def summarize_text(text, api_key=st.secrets["OPENAI_API_KEY"]):
-    prompt = (
-        "Please summarize the following text to be concise and to the point:\n\n" + text
-    )
-    messages = [
-        {"role": "user", "content": prompt},
-    ]
+def summarize_text(text, api_key):
+    prompt = "Please summarize the following text to be concise and to the point:\n\n" + text
+    messages = [{"role": "user", "content": prompt}]
     summary = stream_llm_response(messages, model_params={"model": "gpt-4o-mini", "temperature": 0.3}, api_key=api_key)
     return summary
 
@@ -55,10 +47,10 @@ def chunk_text(text, max_tokens=3000):
         chunks.append(chunk)
     return chunks
 
-def generate_mc_questions(content_text, api_key=st.secrets["OPENAI_API_KEY"]):
+def generate_mc_questions(content_text, api_key):
     prompt = (
         """// Objective:
-- You convert part of the {content} to JSON. Your output is always in German.
+- You convert part of the content to JSON. Your output is always in German.
 - Generate 15 multiple choice questions based on the key concepts and information from the provided JSON file. 
 - Each question should have one correct answer and two plausible incorrect answers.
 
@@ -78,7 +70,7 @@ def generate_mc_questions(content_text, api_key=st.secrets["OPENAI_API_KEY"]):
 4. Provide Feedback:
 For the correct answer, provide "feedback" that includes further information in one sentence.
 For each incorrect answer, provide "feedback" that includes the correct answer in one sentence.
-For each question, provide "real_life_examples" 
+For each question, provide "real_life_examples".
 
 5. Format:
 The output is STRICTLY formatted according to //Output. Including "additional_info" and "real_life_examples".
@@ -93,8 +85,8 @@ answers: An array of answer objects.
 text: The text of the answer.
 is_correct: A boolean indicating if the answer is correct.
 feedback: Feedback for the answer, providing additional context and explanation.
-points: Points awarded for a correct answer, e.g. '1'
-penalty: Penalty points for an incorrect answer, e.g. '-0.5'
+points: Points awarded for a correct answer, e.g. '1'.
+penalty: Penalty points for an incorrect answer, e.g. '-0.5'.
 additional_info: Any extra information that might be useful, such as "real-life examples".
 
 //Output
@@ -157,21 +149,19 @@ additional_info: Any extra information that might be useful, such as "real-life 
   ]
 }
 """
-    )
-    messages = [
-        {"role": "user", "content": content_text},
-        {"role": "user", "content": prompt},
-    ]
+    ).replace("{content}", content_text)
+    
+    messages = [{"role": "user", "content": prompt}]
     response = stream_llm_response(messages, model_params={"model": "gpt-4o-mini", "temperature": 0.3}, api_key=api_key)
     return response
 
 def parse_generated_questions(response):
     try:
-        json_start = response.find('[')
-        json_end = response.rfind(']') + 1
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
         json_str = response[json_start:json_end]
 
-        questions = json.loads(json_str)
+        questions = json.loads(json_str)["questions"]
         return questions
     except json.JSONDecodeError as e:
         st.error(f"JSON parsing error: {e}")
@@ -208,27 +198,25 @@ def generate_pdf(questions):
     pdf.add_page()
 
     for i, q in enumerate(questions):
-        question = f"Q{i+1}: {q['question']}"
+        question = f"Q{i+1}: {q['question_text']}"
         pdf.chapter_title(question)
 
-        choices = "\n".join(q['choices'])
+        choices = "\n".join([answer['text'] for answer in q['answers']])
         pdf.chapter_body(choices)
 
-        correct_answer = f"Correct answer: {q['correct_answer']}"
+        correct_answer = f"Correct answer: {next(answer['text'] for answer in q['answers'] if answer['is_correct'])}"
         pdf.chapter_body(correct_answer)
 
-        explanation = f"Explanation: {q['explanation']}"
+        explanation = f"Explanation: {next(answer['feedback'] for answer in q['answers'] if answer['is_correct'])}"
         pdf.chapter_body(explanation)
 
     return pdf.output(dest="S").encode("latin1")
 
 # Integration with the main app
 def main():
-    # Load your OpenAI API key from the environment variable
     dotenv.load_dotenv()
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
-    # Initialize app_mode if it doesn't exist
     if "app_mode" not in st.session_state:
         st.session_state.app_mode = "Upload PDF & Generate Questions"
     
@@ -239,14 +227,10 @@ def main():
     
     st.sidebar.markdown("## About")
     st.sidebar.video("https://youtu.be/zE3ToJLLSIY")
-    st.sidebar.info(
-        """
-        placeholder
-        """
-    )
+    st.sidebar.info("placeholder")
     
     if st.session_state.app_mode == "Upload PDF & Generate Questions":
-        pdf_upload_app()
+        pdf_upload_app(OPENAI_API_KEY)
     elif st.session_state.app_mode == "Take the Quiz":
         if 'mc_test_generated' in st.session_state and st.session_state.mc_test_generated:
             if 'generated_questions' in st.session_state and st.session_state.generated_questions:
@@ -258,7 +242,7 @@ def main():
     elif st.session_state.app_mode == "Download as PDF":
         download_pdf_app()
 
-def pdf_upload_app():
+def pdf_upload_app(api_key):
     st.title("Upload Your Lecture - Create Your Test Exam")
     st.subheader("Show Us the Slides and We do the Rest")
 
@@ -274,14 +258,14 @@ def pdf_upload_app():
         st.success("PDF content added to the session.")
     
     if len(content_text) > 3000:
-        content_text = summarize_text(content_text)
+        content_text = summarize_text(content_text, api_key)
 
     if content_text:
         st.info("Generating the exam from the uploaded content. It will take just a minute...")
         chunks = chunk_text(content_text)
         questions = []
         for chunk in chunks:
-            response = generate_mc_questions(chunk)
+            response = generate_mc_questions(chunk, api_key)
             parsed_questions = parse_generated_questions(response)
             if parsed_questions:
                 questions.extend(parsed_questions)
@@ -291,7 +275,6 @@ def pdf_upload_app():
             st.session_state.mc_test_generated = True
             st.success("The game has been successfully created! Switch the Sidebar Panel to solve the exam.")
             
-            # Wait 2 seconds and switch to quiz mode
             time.sleep(2)
             st.session_state.app_mode = "Take the Quiz"
             st.rerun()
@@ -323,13 +306,13 @@ def mc_quiz_app():
             st.session_state.correct_answers = 0
 
         for i, quiz_data in enumerate(questions):
-            st.markdown(f"### Question {i+1}: {quiz_data['question']}")
+            st.markdown(f"### Question {i+1}: {quiz_data['question_text']}")
 
             if st.session_state.answers[i] is None:
-                user_choice = st.radio("Choose an answer:", quiz_data['choices'], key=f"user_choice_{i}")
+                user_choice = st.radio("Choose an answer:", [answer['text'] for answer in quiz_data['answers']], key=f"user_choice_{i}")
                 st.button(f"Submit your answer {i+1}", key=f"submit_{i}", on_click=submit_answer, args=(i, quiz_data))
             else:
-                st.radio("Choose an answer:", quiz_data['choices'], key=f"user_choice_{i}", index=quiz_data['choices'].index(st.session_state.answers[i]), disabled=True)
+                st.radio("Choose an answer:", [answer['text'] for answer in quiz_data['answers']], key=f"user_choice_{i}", index=[answer['text'] for answer in quiz_data['answers']].index(st.session_state.answers[i]), disabled=True)
                 if st.session_state.feedback[i][0] == "Correct":
                     st.success(st.session_state.feedback[i][0])
                 else:
@@ -353,11 +336,11 @@ def download_pdf_app():
 
     if questions:
         for i, q in enumerate(questions):
-            st.markdown(f"### Q{i+1}: {q['question']}")
-            for choice in q['choices']:
-                st.write(choice)
-            st.write(f"**Correct answer:** {q['correct_answer']}")
-            st.write(f"**Explanation:** {q['explanation']}")
+            st.markdown(f"### Q{i+1}: {q['question_text']}")
+            for choice in q['answers']:
+                st.write(choice['text'])
+            st.write(f"**Correct answer:** {next(answer['text'] for answer in q['answers'] if answer['is_correct'])}")
+            st.write(f"**Explanation:** {next(answer['feedback'] for answer in q['answers'] if answer['is_correct'])}")
             st.write("---")
 
         pdf_bytes = generate_pdf(questions)
